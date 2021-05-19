@@ -1,0 +1,9 @@
+[package]
+name = "zookeeper-operator-integration-tests"
+version = "0.1.0"
+authors = ["Razvan-Daniel Mihai <84674+razvan@users.noreply.github.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
