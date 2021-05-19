@@ -71,6 +71,12 @@ impl TestKubeClient {
     }
 
     /// Searches for a named resource.
+    pub fn find_crd(&self, name: &str) -> Option<CustomResourceDefinition>
+    {
+        self.runtime
+            .block_on(async { self.kube_client.find_crd(name).await })
+    }
+    /// Searches for a named resource.
     pub fn find<K>(&self, name: &str) -> Option<K>
     where
         K: Clone + DeserializeOwned + Meta,
@@ -210,6 +216,13 @@ impl KubeClient {
             crd.name(),
             timeout_secs
         ))
+    }
+
+    /// Searches for a CRD which is not named resource.
+    pub async fn find_crd(&self, name: &str) -> Option<CustomResourceDefinition>
+    {
+        let api: Api<CustomResourceDefinition> = Api::all(self.client.clone());
+        api.get(name).await.ok()
     }
 
     /// Searches for a named resource.
