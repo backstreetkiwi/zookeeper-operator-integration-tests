@@ -1,8 +1,37 @@
-use crate::test::kube::TestKubeClient;
-use crate::test::prelude::Pod;
-
+use crate::common::four_letter_commands::send_4lw_i_am_ok;
 use anyhow::{anyhow, Result};
-use k8s_openapi::api::core::v1::ConfigMap;
+use integration_test_commons::test::kube::TestKubeClient;
+use integration_test_commons::test::prelude::{ConfigMap, Pod};
+use stackable_zookeeper_crd::ZookeeperVersion;
+use std::net::TcpStream;
+
+/// Collect and gather all checks that may be performed on ZooKeeper server pods.
+pub fn custom_pod_checks(
+    client: &TestKubeClient,
+    pods: &[Pod],
+    version: &ZookeeperVersion,
+    client_port: u16,
+    expected_pod_count: usize,
+) -> Result<()> {
+    for pod in pods {
+        send_4lw_i_am_ok(pod, version, client_port)?;
+        check_config_map(client, pod, expected_pod_count)?;
+    }
+    Ok(())
+}
+
+/// Collect and gather all checks with regard to metrics and container ports.
+pub fn custom_monitoring_checks(
+    pods: &[Pod],
+    container_ports: &[(&str, u16)],
+    container_name: &str,
+) -> Result<()> {
+    for pod in pods {
+        check_container_ports(pod, container_ports, container_name)?;
+        check_metrics_port_open(pod, container_name)?;
+    }
+    Ok(())
+}
 
 /// Perform checks on configmaps for:
 /// - server.<id> property set correctly (especially with scale up / down)
@@ -12,9 +41,101 @@ pub fn check_config_map(
     expected_server_count: usize,
 ) -> Result<()> {
     let config_cm_name = get_config_cm(pod)?;
-    let config_map: Option<ConfigMap> = client.find(&config_cm_name);
+    let config_map: Option<ConfigMap> = client.find_namespaced(&config_cm_name);
 
     check_for_server_id_property_count(config_map, expected_server_count)
+}
+
+/// Check if container ports with given name and port number are set in the pod.
+pub fn check_container_ports(
+    pod: &Pod,
+    container_ports: &[(&str, u16)],
+    container_name: &str,
+) -> Result<()> {
+    let got_port_count = pod
+        .spec
+        .as_ref()
+        .unwrap()
+        .containers
+        .iter()
+        .find(|container| container.name == container_name)
+        .map_or(0usize, |c| {
+            let mut found: usize = 0;
+            for port in &c.ports {
+                for (name, number) in container_ports {
+                    if port.name == Some(name.to_string())
+                        && port.container_port == i32::from(*number)
+                    {
+                        found += 1;
+                    }
+                }
+            }
+            found
+        });
+
+    return if got_port_count == container_ports.len() {
+        Ok(())
+    } else {
+        Err(anyhow!("Required container_ports in container [{}] do not match the specified pod container ports. Required [{}] vs provided [{}]",
+        container_name, container_ports.len(), got_port_count))
+    };
+}
+
+pub fn check_metrics_port_open(pod: &Pod, container_name: &str) -> Result<()> {
+    let container_port_name = "metrics";
+    // extract hostname from port
+    let node_name = match &pod.spec.as_ref().unwrap().node_name {
+        None => {
+            return Err(anyhow!(
+                "Missing node_name in pod [{}]. Cannot create host address for metrics port check!",
+                pod.metadata.name.as_ref().unwrap(),
+            ))
+        }
+        Some(name) => name,
+    };
+
+    let zk_container = pod
+        .spec
+        .as_ref()
+        .unwrap()
+        .containers
+        .iter()
+        .find(|container| container.name == container_name);
+
+    // extract metrics port from container_port
+    let port = match zk_container {
+        None => {
+            return Err(anyhow!(
+                "Missing container [{}] in pod [{}]. Cannot create extract host port for metrics port check!",
+                container_name, pod.metadata.name.as_ref().unwrap(),
+            ))
+        }
+        Some(container) => {
+            match container.ports.iter().find(|port| port.name == Some(container_port_name.to_string())) {
+                None => {            return Err(anyhow!(
+                "Missing container_port [{}] in pod [{}]. Cannot create extract host port for metrics port check!",
+                container_port_name, pod.metadata.name.as_ref().unwrap(),
+            ))}
+                Some(container_port) => {
+                    container_port.container_port
+                }
+            }
+        }
+    };
+
+    scan_port(&format!("{}:{}", node_name, port))
+}
+
+/// Scan port of an address.
+pub fn scan_port(address: &str) -> Result<()> {
+    match TcpStream::connect(address) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(
+            "TCP error occurred when connecting to [{}]: {}",
+            address,
+            err.to_string()
+        )),
+    }
 }
 
 /// This is a simple check for the correctness of the server property in config maps.
@@ -29,7 +150,7 @@ fn check_for_server_id_property_count(
 ) -> Result<()> {
     let mut server_count: usize = 0;
     if let Some(config_map) = cm {
-        let data = config_map.data.unwrap();
+        let data = config_map.data;
 
         // TODO: This might interfere with other properties having the "server."
         //    string contained. Needs more stable solution.
@@ -50,15 +171,14 @@ fn check_for_server_id_property_count(
 
 /// Extracts the name of the "config" configmap of a pod.
 fn get_config_cm(pod: &Pod) -> Result<String> {
-    let volumes = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+    let volumes = &pod.spec.as_ref().unwrap().volumes;
     let mut cm_name: &str = "";
     let pod_name = pod.metadata.name.as_ref().unwrap();
 
     for volume in volumes {
         cm_name = volume.config_map.as_ref().unwrap().name.as_ref().unwrap();
 
-        // TODO: use create_config_map_name if available in zookeeper
-        if cm_name == &format!("{}-config", pod_name) {
+        if *cm_name == format!("{}-config", pod_name) {
             return Ok(cm_name.to_string());
         }
     }
