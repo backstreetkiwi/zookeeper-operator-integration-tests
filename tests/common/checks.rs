@@ -1,12 +1,12 @@
 use crate::common::four_letter_commands::send_4lw_i_am_ok;
 use anyhow::{anyhow, Result};
 use integration_test_commons::test::kube::TestKubeClient;
-use integration_test_commons::test::prelude::{ConfigMap, Pod};
+use integration_test_commons::test::prelude::{ConfigMap, ConfigMapVolumeSource, Pod};
 use stackable_zookeeper_crd::ZookeeperVersion;
 use std::net::TcpStream;
 
 /// Collect and gather all checks that may be performed on ZooKeeper server pods.
-pub fn custom_pod_checks(
+pub fn custom_checks(
     client: &TestKubeClient,
     pods: &[Pod],
     version: &ZookeeperVersion,
@@ -40,7 +40,11 @@ pub fn check_config_map(
     pod: &Pod,
     expected_server_count: usize,
 ) -> Result<()> {
-    let config_cm_name = get_config_cm(pod)?;
+    let config_cm_name = get_config_cm(
+        client,
+        pod,
+        stackable_operator::configmap::CONFIGMAP_TYPE_LABEL,
+    )?;
     let config_map: Option<ConfigMap> = client.find_namespaced(&config_cm_name);
 
     check_for_server_id_property_count(config_map, expected_server_count)
@@ -169,23 +173,32 @@ fn check_for_server_id_property_count(
     ))
 }
 
-/// Extracts the name of the "config" configmap of a pod.
-fn get_config_cm(pod: &Pod) -> Result<String> {
+/// Extracts the name of the `config_type_label` configmap of a pod.
+fn get_config_cm(client: &TestKubeClient, pod: &Pod, config_type_label: &str) -> Result<String> {
     let volumes = &pod.spec.as_ref().unwrap().volumes;
-    let mut cm_name: &str = "";
     let pod_name = pod.metadata.name.as_ref().unwrap();
 
     for volume in volumes {
-        cm_name = volume.config_map.as_ref().unwrap().name.as_ref().unwrap();
-
-        if *cm_name == format!("{}-config", pod_name) {
-            return Ok(cm_name.to_string());
+        if let Some(ConfigMapVolumeSource {
+            name: Some(cm_name),
+            ..
+        }) = &volume.config_map
+        {
+            // get config map and check labels for `config_type_label` which indicates the type
+            // of the config map we are looking for.
+            if let Some(config_map) = client.find_namespaced::<ConfigMap>(cm_name) {
+                if config_map.metadata.labels.get(config_type_label)
+                    == Some(&stackable_zookeeper_crd::CONFIG_MAP_TYPE_DATA.to_string())
+                {
+                    return Ok(cm_name.clone());
+                }
+            }
         }
     }
 
     Err(anyhow!(
-        "Could not find config map [{}] for pod [{}]",
-        cm_name,
+        "Could not find config map of type [{}] for pod [{}]",
+        config_type_label,
         pod_name
     ))
 }

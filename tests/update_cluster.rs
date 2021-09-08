@@ -1,9 +1,7 @@
 pub mod common;
 
-use crate::common::checks::custom_pod_checks;
-use crate::common::zookeeper::{
-    append_random_characters, build_test_cluster, build_zk_custom_resource_1_server,
-};
+use crate::common::checks::custom_checks;
+use crate::common::zookeeper::{append_random_characters, build_test_cluster, build_zk_cluster};
 use anyhow::Result;
 use integration_test_commons::test::prelude::Pod;
 use stackable_zookeeper_crd::ZookeeperVersion;
@@ -17,11 +15,11 @@ fn test_cluster_update() -> Result<()> {
     let version_update = ZookeeperVersion::v3_5_8;
     let mut cluster = build_test_cluster();
 
-    let (zookeeper_cr, expected_pod_count) = build_zk_custom_resource_1_server(&name, &version)?;
+    let (zookeeper_cr, expected_pod_count) = build_zk_cluster(&name, &version, 1)?;
     cluster.create_or_update(&zookeeper_cr, expected_pod_count)?;
-    let created_pods = cluster.get_current_pods();
+    let created_pods = cluster.list_pods();
 
-    custom_pod_checks(
+    custom_checks(
         &cluster.client,
         created_pods.as_slice(),
         &version,
@@ -30,12 +28,11 @@ fn test_cluster_update() -> Result<()> {
     )?;
     check_pod_version(&version, created_pods.as_slice());
 
-    let (zookeeper_cr, expected_pod_count) =
-        build_zk_custom_resource_1_server(&name, &version_update)?;
+    let (zookeeper_cr, expected_pod_count) = build_zk_cluster(&name, &version_update, 1)?;
     cluster.create_or_update(&zookeeper_cr, expected_pod_count)?;
-    let created_pods = cluster.get_current_pods();
+    let created_pods = cluster.list_pods();
 
-    custom_pod_checks(
+    custom_checks(
         &cluster.client,
         created_pods.as_slice(),
         &version_update,

@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use stackable_zookeeper_crd::ZookeeperVersion;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// If pods are set to "ready" the cluster may still need time to balance to be fully ready.
+/// Therefore we resend the 4lw (if not successful) in the defined timeout period.
+const FOUR_LETTER_WORD_REQUEST_TIMEOUT: u64 = 10;
 
 /// Lists the outstanding sessions and ephemeral nodes. This only works on the leader.
 //pub const DUMP: &str = "dump";
@@ -35,8 +41,15 @@ pub fn send_4lw_i_am_ok(pod: &Pod, version: &ZookeeperVersion, port: u16) -> Res
         I_AM_OK.to_string()
     };
 
-    assert_eq!(
-        send_4lw(
+    // The cluster requires some time to balance after all pods are "ready". This may result in four
+    // letter word requests to fail shortly after. He we resend the four letter word every two
+    // seconds for the defined timeout FOUR_LETTER_WORD_REQUEST_TIMEOUT.
+    let now = Instant::now();
+    let mut last_response = Ok("<no-response-received>".to_string());
+
+    while now.elapsed().as_secs() < Duration::from_secs(FOUR_LETTER_WORD_REQUEST_TIMEOUT).as_secs()
+    {
+        last_response = send_4lw(
             version,
             ARE_YOU_OK,
             &format!(
@@ -44,11 +57,26 @@ pub fn send_4lw_i_am_ok(pod: &Pod, version: &ZookeeperVersion, port: u16) -> Res
                 pod.spec.as_ref().unwrap().node_name.as_ref().unwrap(),
                 port
             ),
-        )?,
-        ver
-    );
+        );
 
-    Ok(())
+        if last_response.is_err() || last_response.as_ref().unwrap() != &ver {
+            println!(
+                "[{}] Received: {:?}. Will resend command.",
+                ARE_YOU_OK, last_response
+            );
+            thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "Could not verify cluster status response via [{}] within the specified timeout [{}]: {:?}",
+        ARE_YOU_OK,
+        FOUR_LETTER_WORD_REQUEST_TIMEOUT,
+        last_response
+    ))
 }
 
 /// This sends the "four letter word" in order to check if the cluster is ready or to get
@@ -92,7 +120,7 @@ struct AdminServerResponse {
     pub error: Option<String>,
 }
 
-/// Send a http request to "http:<host>:<port>/commands/<command>
+/// Send a http request to "http://HOST:PORT/commands/COMMAND"
 /// It will return a JSON response containing at least:
 /// {
 ///     command: "some_string",
